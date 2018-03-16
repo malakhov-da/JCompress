@@ -35,7 +35,10 @@ import com.github.jcompress.unrar.rarfile.UnrarHeadertype;
 import com.github.jcompress.unrar.unpack.ComprDataIO;
 import com.github.jcompress.unrar.unpack.Unpack;
 import java.io.FileOutputStream;
-
+/**
+ * http://formatsfiles.narod.ru/rar.html
+ * @author MalakhovDA
+ */
 public class Archive implements Closeable {
 
     private static Logger logger = Logger.getLogger(Archive.class.getName());
