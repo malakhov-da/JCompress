@@ -1,10 +1,6 @@
 package com.github.junrar;
 
 
-/**
- *
- * @author alban
- */
 public interface UnrarCallback {
 
     /**
@@ -14,8 +10,8 @@ public interface UnrarCallback {
     boolean isNextVolumeReady(Volume nextVolume);
 
     /**
-     * This method is invoked each time the progress of the current
-     * volume changes.
+     * This method is invoked each time the progress of the current volume
+     * changes.
      */
     void volumeProgressChanged(long current, long total);
 }
