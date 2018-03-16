@@ -15,6 +15,7 @@ import java.util.logging.Logger;
 import com.github.junrar.exception.RarException;
 import com.github.junrar.exception.RarException.RarExceptionType;
 import com.github.junrar.impl.FileVolumeManager;
+import com.github.junrar.impl.InputStreamVolumeManager;
 import com.github.junrar.io.IReadOnlyAccess;
 import com.github.junrar.rarfile.AVHeader;
 import com.github.junrar.rarfile.BaseBlock;
@@ -33,6 +34,7 @@ import com.github.junrar.rarfile.UnixOwnersHeader;
 import com.github.junrar.rarfile.UnrarHeadertype;
 import com.github.junrar.unpack.ComprDataIO;
 import com.github.junrar.unpack.Unpack;
+import java.io.FileOutputStream;
 
 public class Archive implements Closeable {
 
@@ -97,6 +99,14 @@ public class Archive implements Closeable {
         this(new FileVolumeManager(firstVolume), unrarCallback);
     }
 
+    public Archive(InputStream firstVolume) throws RarException, IOException {
+        this(new InputStreamVolumeManager(firstVolume), null);
+    }
+
+    public Archive(InputStream firstVolume, UnrarCallback unrarCallback)
+            throws RarException, IOException {
+        this(new InputStreamVolumeManager(firstVolume), unrarCallback);
+    }
     // public File getFile() {
     // return file;
     // }
@@ -105,6 +115,7 @@ public class Archive implements Closeable {
     // this.file = file;
     // setFile(new ReadOnlyAccessFile(file), file.length());
     // }
+
     private void setFile(IReadOnlyAccess file, long length) throws IOException {
         totalPackedSize = 0L;
         totalPackedRead = 0L;
@@ -143,6 +154,15 @@ public class Archive implements Closeable {
 
     public IReadOnlyAccess getRof() {
         return rof;
+    }
+
+    /**
+     * Gets all of the headers in the archive.
+     *
+     * @return returns the headers.
+     */
+    public List<BaseBlock> getHeaders() {
+        return new ArrayList<BaseBlock>(headers);
     }
 
     /**
@@ -196,209 +216,228 @@ public class Archive implements Closeable {
         newMhd = null;
         headers.clear();
         currentHeaderIndex = 0;
-        int toRead = 0;
-
+        boolean error = false;
         while (true) {
             int size = 0;
-            long newpos = 0;
             byte[] baseBlockBuffer = new byte[BaseBlock.BaseBlockSize];
-
             long position = rof.getPosition();
-
-            // Weird, but is trying to read beyond the end of the file
-            if (position >= fileLength) {
-                break;
-            }
-
-            // logger.info("\n--------reading header--------");
             size = rof.readFully(baseBlockBuffer, BaseBlock.BaseBlockSize);
-            if (size == 0) {
-                break;
+            if (size < BaseBlock.BaseBlockSize) {
+                return;
             }
             BaseBlock block = new BaseBlock(baseBlockBuffer);
-
             block.setPositionInFile(position);
-
-            switch (block.getHeaderType()) {
-
-                case MarkHeader:
-                    markHead = new MarkHeader(block);
+            try {
+                BaseBlock bb = processBaseBlock(block);
+                if (error && (bb == null || !(bb instanceof FileHeader) || ((FileHeader) bb).getFileNameString() == null)) {
+                    throw new Exception();
+                }
+                if (bb == null) {
+                    continue;
+                }
+                headers.add(bb);
+                if (bb instanceof MarkHeader) {
+                    markHead = (MarkHeader) bb;
                     if (!markHead.isSignature()) {
-                        throw new RarException(
-                                RarException.RarExceptionType.badRarArchive);
+                        throw new RarException(RarException.RarExceptionType.badRarArchive);
                     }
-                    headers.add(markHead);
-                    // markHead.print();
-                    break;
-
-                case MainHeader:
-                    toRead = block.hasEncryptVersion() ? MainHeader.mainHeaderSizeWithEnc
-                            : MainHeader.mainHeaderSize;
-                    byte[] mainbuff = new byte[toRead];
-                    rof.readFully(mainbuff, toRead);
-                    MainHeader mainhead = new MainHeader(block, mainbuff);
-                    headers.add(mainhead);
-                    this.newMhd = mainhead;
+                }
+                if (bb instanceof MainHeader) {
+                    this.newMhd = (MainHeader) bb;
                     if (newMhd.isEncrypted()) {
-                        throw new RarException(
-                                RarExceptionType.rarEncryptedException);
+                        throw new RarException(RarExceptionType.rarEncryptedException);
                     }
-                    // mainhead.print();
-                    break;
-
-                case SignHeader:
-                    toRead = SignHeader.signHeaderSize;
-                    byte[] signBuff = new byte[toRead];
-                    rof.readFully(signBuff, toRead);
-                    SignHeader signHead = new SignHeader(block, signBuff);
-                    headers.add(signHead);
-                    // logger.info("HeaderType: SignHeader");
-
-                    break;
-
-                case AvHeader:
-                    toRead = AVHeader.avHeaderSize;
-                    byte[] avBuff = new byte[toRead];
-                    rof.readFully(avBuff, toRead);
-                    AVHeader avHead = new AVHeader(block, avBuff);
-                    headers.add(avHead);
-                    // logger.info("headertype: AVHeader");
-                    break;
-
-                case CommHeader:
-                    toRead = CommentHeader.commentHeaderSize;
-                    byte[] commBuff = new byte[toRead];
-                    rof.readFully(commBuff, toRead);
-                    CommentHeader commHead = new CommentHeader(block, commBuff);
-                    headers.add(commHead);
-                    // logger.info("method: "+commHead.getUnpMethod()+"; 0x"+
-                    // Integer.toHexString(commHead.getUnpMethod()));
-                    newpos = commHead.getPositionInFile()
-                            + commHead.getHeaderSize();
-                    rof.setPosition(newpos);
-
-                    break;
-                case EndArcHeader:
-
-                    toRead = 0;
-                    if (block.hasArchiveDataCRC()) {
-                        toRead += EndArcHeader.endArcArchiveDataCrcSize;
-                    }
-                    if (block.hasVolumeNumber()) {
-                        toRead += EndArcHeader.endArcVolumeNumberSize;
-                    }
-                    EndArcHeader endArcHead;
-                    if (toRead > 0) {
-                        byte[] endArchBuff = new byte[toRead];
-                        rof.readFully(endArchBuff, toRead);
-                        endArcHead = new EndArcHeader(block, endArchBuff);
-                        // logger.info("HeaderType: endarch\ndatacrc:"+
-                        // endArcHead.getArchiveDataCRC());
-                    } else {
-                        // logger.info("HeaderType: endarch - no Data");
-                        endArcHead = new EndArcHeader(block, null);
-                    }
-                    headers.add(endArcHead);
-                    // logger.info("\n--------end header--------");
+                }
+            } catch (Exception e) {
+                if (position + 1 >= fileLength) {
                     return;
-
-                default:
-                    byte[] blockHeaderBuffer = new byte[BlockHeader.blockHeaderSize];
-                    rof.readFully(blockHeaderBuffer, BlockHeader.blockHeaderSize);
-                    BlockHeader blockHead = new BlockHeader(block,
-                            blockHeaderBuffer);
-
-                    switch (blockHead.getHeaderType()) {
-                        case NewSubHeader:
-                        case FileHeader:
-                            toRead = blockHead.getHeaderSize()
-                                    - BlockHeader.BaseBlockSize
-                                    - BlockHeader.blockHeaderSize;
-                            byte[] fileHeaderBuffer = new byte[toRead];
-                            rof.readFully(fileHeaderBuffer, toRead);
-
-                            FileHeader fh = new FileHeader(blockHead, fileHeaderBuffer);
-                            headers.add(fh);
-                            newpos = fh.getPositionInFile() + fh.getHeaderSize()
-                                    + fh.getFullPackSize();
-                            rof.setPosition(newpos);
-                            break;
-
-                        case ProtectHeader:
-                            toRead = blockHead.getHeaderSize()
-                                    - BlockHeader.BaseBlockSize
-                                    - BlockHeader.blockHeaderSize;
-                            byte[] protectHeaderBuffer = new byte[toRead];
-                            rof.readFully(protectHeaderBuffer, toRead);
-                            ProtectHeader ph = new ProtectHeader(blockHead,
-                                    protectHeaderBuffer);
-
-                            newpos = ph.getPositionInFile() + ph.getHeaderSize()
-                                    + ph.getDataSize();
-                            rof.setPosition(newpos);
-                            break;
-
-                        case SubHeader: {
-                            byte[] subHeadbuffer = new byte[SubBlockHeader.SubBlockHeaderSize];
-                            rof.readFully(subHeadbuffer,
-                                    SubBlockHeader.SubBlockHeaderSize);
-                            SubBlockHeader subHead = new SubBlockHeader(blockHead,
-                                    subHeadbuffer);
-                            subHead.print();
-                            switch (subHead.getSubType()) {
-                                case MAC_HEAD: {
-                                    byte[] macHeaderbuffer = new byte[MacInfoHeader.MacInfoHeaderSize];
-                                    rof.readFully(macHeaderbuffer,
-                                            MacInfoHeader.MacInfoHeaderSize);
-                                    MacInfoHeader macHeader = new MacInfoHeader(subHead,
-                                            macHeaderbuffer);
-                                    macHeader.print();
-                                    headers.add(macHeader);
-
-                                    break;
-                                }
-                                // TODO implement other subheaders
-                                case BEEA_HEAD:
-                                    break;
-                                case EA_HEAD: {
-                                    byte[] eaHeaderBuffer = new byte[EAHeader.EAHeaderSize];
-                                    rof.readFully(eaHeaderBuffer, EAHeader.EAHeaderSize);
-                                    EAHeader eaHeader = new EAHeader(subHead,
-                                            eaHeaderBuffer);
-                                    eaHeader.print();
-                                    headers.add(eaHeader);
-
-                                    break;
-                                }
-                                case NTACL_HEAD:
-                                    break;
-                                case STREAM_HEAD:
-                                    break;
-                                case UO_HEAD:
-                                    toRead = subHead.getHeaderSize();
-                                    toRead -= BaseBlock.BaseBlockSize;
-                                    toRead -= BlockHeader.blockHeaderSize;
-                                    toRead -= SubBlockHeader.SubBlockHeaderSize;
-                                    byte[] uoHeaderBuffer = new byte[toRead];
-                                    rof.readFully(uoHeaderBuffer, toRead);
-                                    UnixOwnersHeader uoHeader = new UnixOwnersHeader(
-                                            subHead, uoHeaderBuffer);
-                                    uoHeader.print();
-                                    headers.add(uoHeader);
-                                    break;
-                                default:
-                                    break;
-                            }
-
-                            break;
-                        }
-                        default:
-                            logger.warning("Unknown Header");
-                            throw new RarException(RarExceptionType.notRarArchive);
-
-                    }
+                }
+                rof.setPosition(position + 1);
+                error = true;
             }
-            // logger.info("\n--------end header--------");
+        }
+    }
+
+    private BaseBlock processBaseBlock(BaseBlock block) throws IOException, RarException {
+        switch (block.getHeaderType()) {
+            case MarkHeader: {
+                return new MarkHeader(block);
+            }
+            case MainHeader: {
+                int toRead = block.hasEncryptVersion() ? MainHeader.mainHeaderSizeWithEnc : MainHeader.mainHeaderSize;
+                byte[] mainbuff = new byte[toRead];
+                rof.readFully(mainbuff, toRead);
+                return new MainHeader(block, mainbuff);
+            }
+            case SignHeader: {
+                int toRead = SignHeader.signHeaderSize;
+                byte[] signBuff = new byte[toRead];
+                rof.readFully(signBuff, toRead);
+                return new SignHeader(block, signBuff);
+            }
+            case AvHeader: {
+                int toRead = AVHeader.avHeaderSize;
+                byte[] avBuff = new byte[toRead];
+                rof.readFully(avBuff, toRead);
+                return new AVHeader(block, avBuff);
+            }
+
+            case CommHeader: {
+                int toRead = CommentHeader.commentHeaderSize;
+                byte[] commBuff = new byte[toRead];
+                rof.readFully(commBuff, toRead);
+                CommentHeader commHead = new CommentHeader(block, commBuff);
+                rof.setPosition(commHead.getPositionInFile() + commHead.getHeaderSize());
+                return commHead;
+            }
+            case EndArcHeader: {
+
+                int toRead = 0;
+                if (block.hasArchiveDataCRC()) {
+                    toRead += EndArcHeader.endArcArchiveDataCrcSize;
+                }
+                if (block.hasVolumeNumber()) {
+                    toRead += EndArcHeader.endArcVolumeNumberSize;
+                }
+                EndArcHeader endArcHead;
+                if (toRead > 0) {
+                    byte[] endArchBuff = new byte[toRead];
+                    rof.readFully(endArchBuff, toRead);
+                    endArcHead = new EndArcHeader(block, endArchBuff);
+                    // logger.info("HeaderType: endarch\ndatacrc:"+
+                    // endArcHead.getArchiveDataCRC());
+                } else {
+                    // logger.info("HeaderType: endarch - no Data");
+                    endArcHead = new EndArcHeader(block, null);
+                }
+                // logger.info("\n--------end header--------");
+                return endArcHead;
+            }
+            default: {
+                byte[] blockHeaderBuffer = new byte[BlockHeader.blockHeaderSize];
+                rof.readFully(blockHeaderBuffer, BlockHeader.blockHeaderSize);
+                return processBlockHeader(new BlockHeader(block, blockHeaderBuffer));
+            }
+        }
+    }
+
+    private BaseBlock processBlockHeader(BlockHeader blockHead) throws IOException, RarException {
+        switch (blockHead.getHeaderType()) {
+            case NewSubHeader:
+            case FileHeader:
+                int toRead = blockHead.getHeaderSize()
+                        - BlockHeader.BaseBlockSize
+                        - BlockHeader.blockHeaderSize;
+                if (toRead < 0) {
+                    break;
+                }
+                byte[] fileHeaderBuffer = new byte[toRead];
+                rof.readFully(fileHeaderBuffer, toRead);
+
+                FileHeader fh = new FileHeader(blockHead, fileHeaderBuffer);
+                rof.setPosition(fh.getPositionInFile() + fh.getHeaderSize() + fh.getFullPackSize());
+                return fh;
+
+            case ProtectHeader:
+                toRead = blockHead.getHeaderSize()
+                        - BlockHeader.BaseBlockSize
+                        - BlockHeader.blockHeaderSize;
+
+                byte[] protectHeaderBuffer = new byte[toRead];
+                rof.readFully(protectHeaderBuffer, toRead);
+                ProtectHeader ph = new ProtectHeader(blockHead,
+                        protectHeaderBuffer);
+
+                rof.setPosition(ph.getPositionInFile() + ph.getHeaderSize() + ph.getDataSize());
+                return ph;
+
+            case SubHeader: {
+                byte[] subHeadbuffer = new byte[SubBlockHeader.SubBlockHeaderSize];
+                rof.readFully(subHeadbuffer,
+                        SubBlockHeader.SubBlockHeaderSize);
+                SubBlockHeader subHead = new SubBlockHeader(blockHead,
+                        subHeadbuffer);
+                subHead.print();
+                switch (subHead.getSubType()) {
+                    case MAC_HEAD: {
+                        byte[] macHeaderbuffer = new byte[MacInfoHeader.MacInfoHeaderSize];
+                        rof.readFully(macHeaderbuffer,
+                                MacInfoHeader.MacInfoHeaderSize);
+                        MacInfoHeader macHeader = new MacInfoHeader(subHead,
+                                macHeaderbuffer);
+                        macHeader.print();
+                        return macHeader;
+                    }
+                    // TODO implement other subheaders
+                    case BEEA_HEAD:
+                        return null;
+                    case EA_HEAD: {
+                        byte[] eaHeaderBuffer = new byte[EAHeader.EAHeaderSize];
+                        rof.readFully(eaHeaderBuffer, EAHeader.EAHeaderSize);
+                        EAHeader eaHeader = new EAHeader(subHead,
+                                eaHeaderBuffer);
+                        eaHeader.print();
+                        return eaHeader;
+                    }
+                    case NTACL_HEAD:
+                        return null;
+                    case STREAM_HEAD:
+                        return null;
+                    case UO_HEAD:
+                        toRead = subHead.getHeaderSize();
+                        toRead -= BaseBlock.BaseBlockSize;
+                        toRead -= BlockHeader.blockHeaderSize;
+                        toRead -= SubBlockHeader.SubBlockHeaderSize;
+                        byte[] uoHeaderBuffer = new byte[toRead];
+                        rof.readFully(uoHeaderBuffer, toRead);
+                        UnixOwnersHeader uoHeader = new UnixOwnersHeader(
+                                subHead, uoHeaderBuffer);
+                        uoHeader.print();
+                        return uoHeader;
+                }
+            }
+
+        }
+        logger.warning("Unknown Header");
+        throw new RarException(RarExceptionType.notRarArchive);
+    }
+
+    /**
+     * Extracts specified header to specified directory. Path in the header and
+     * specified directory will be constructed if it does not already exist.
+     *
+     * @param hd specified header
+     * @param destPath directory where the header needs to be extracted
+     * @throws RarException
+     *
+     */
+    public void extractFile(FileHeader hd, String destPath) throws RarException {
+        File oFile, oFinalDir;
+        OutputStream oFileStream;
+        String sFilePath;
+
+        if (!headers.contains(hd)) {
+            throw new RarException(RarExceptionType.headerNotInArchive);
+        }
+        try {
+
+            sFilePath = destPath + File.separator + hd.getFileNameString();
+            oFile = new File(sFilePath);
+            oFinalDir = new File(oFile.getParent());
+
+            if (!oFinalDir.exists()) {
+                oFinalDir.mkdirs();
+            }
+
+            oFileStream = new FileOutputStream(oFile);
+            doExtractFile(hd, oFileStream);
+            oFileStream.close();
+        } catch (Exception e) {
+            if (e instanceof RarException) {
+                throw (RarException) e;
+            } else {
+                throw new RarException(e);
+            }
         }
     }
 
@@ -406,7 +445,7 @@ public class Archive implements Closeable {
      * Extract the file specified by the given header and write it to the
      * supplied output stream
      *
-     * @param header the header to be extracted
+     * @param hd the header to be extracted
      * @param os the outputstream
      * @throws RarException
      */
@@ -430,7 +469,7 @@ public class Archive implements Closeable {
      * stream it. Please note that this method will create a new Thread and an a
      * pair of Pipe streams.
      *
-     * @param header the header to be extracted
+     * @param hd the header to be extracted
      * @throws RarException
      * @throws IOException if any IO error occur
      */
